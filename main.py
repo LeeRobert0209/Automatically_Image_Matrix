@@ -4,9 +4,9 @@ from datetime import datetime
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QListWidget, QLabel, 
                              QMessageBox, QAbstractItemView, QRadioButton, QButtonGroup,
-                             QSlider, QGroupBox)
+                             QSlider, QGroupBox, QLineEdit)
 from PyQt6.QtCore import Qt, QMimeData, QThread, pyqtSignal
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIntValidator
 
 from sorter import sort_files
 from stitcher import stitch_images
@@ -75,15 +75,28 @@ class ImageStitcherApp(QMainWindow):
         self.radio_1080 = QRadioButton("宽度 1080px")
         
         self.radio_original.setChecked(True)
+
+        self.radio_custom = QRadioButton("自定义")
+        self.custom_width_input = QLineEdit()
+        self.custom_width_input.setPlaceholderText("输入宽度")
+        self.custom_width_input.setValidator(QIntValidator(1, 20000)) # Limit to reasonable width
+        self.custom_width_input.setFixedWidth(80)
+        self.custom_width_input.setEnabled(False) # Default disabled
+        
+        # Connect signal to enable/disable input
+        self.radio_custom.toggled.connect(lambda checked: self.custom_width_input.setEnabled(checked))
         
         self.size_btn_group = QButtonGroup()
         self.size_btn_group.addButton(self.radio_original)
         self.size_btn_group.addButton(self.radio_750)
         self.size_btn_group.addButton(self.radio_1080)
+        self.size_btn_group.addButton(self.radio_custom)
         
         size_layout.addWidget(self.radio_original)
         size_layout.addWidget(self.radio_750)
         size_layout.addWidget(self.radio_1080)
+        size_layout.addWidget(self.radio_custom)
+        size_layout.addWidget(self.custom_width_input)
         size_group.setLayout(size_layout)
         controls_layout.addWidget(size_group)
 
@@ -178,6 +191,17 @@ class ImageStitcherApp(QMainWindow):
             target_width = 750
         elif self.radio_1080.isChecked():
             target_width = 1080
+        elif self.radio_custom.isChecked():
+            try:
+                val_text = self.custom_width_input.text().strip()
+                if not val_text:
+                    raise ValueError("Empty input")
+                target_width = int(val_text)
+                if target_width <= 0:
+                    raise ValueError("Width must be positive")
+            except ValueError:
+                QMessageBox.warning(self, "输入错误", "请输入有效的数字宽度（像素）！")
+                return
 
         self.stitch_btn.setEnabled(False)
         self.stitch_btn.setText("正在拼接... (请稍候)")
