@@ -36,7 +36,7 @@ def _stitch_single_group(images, target_width=None):
 
     return stitched_img
 
-def stitch_images(image_paths, output_dir, split_count=1, target_width=None):
+def stitch_images(image_paths, output_dir, split_count=1, target_width=None, max_kb=None):
     """
     Stitches images, splitting them into multiple files to balance total height.
     """
@@ -162,7 +162,9 @@ def stitch_images(image_paths, output_dir, split_count=1, target_width=None):
                     output_path = os.path.join(output_dir, filename)
                     counter += 1
                 
-                result_img.save(output_path)
+                # Use the new compression utility
+                from utils import save_compressed_image
+                save_compressed_image(result_img, output_path, max_kb)
                 saved_files.append(filename)
 
         return True, f"Successfully created {len(saved_files)} images."
