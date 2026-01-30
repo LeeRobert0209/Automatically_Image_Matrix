@@ -4,7 +4,7 @@ from datetime import datetime
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QListWidget, QLabel, 
                              QMessageBox, QAbstractItemView, QRadioButton, QButtonGroup,
-                             QSlider, QGroupBox, QLineEdit, QTabWidget, QCheckBox)
+                             QSlider, QGroupBox, QLineEdit, QTabWidget, QCheckBox, QSizePolicy)
 from PyQt6.QtCore import Qt, QMimeData, QThread, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIntValidator, QIcon
 
@@ -16,21 +16,24 @@ from slicer import slice_image, slice_grid_image
 class StitcherThread(QThread):
     finished_signal = pyqtSignal(bool, str)
 
-    def __init__(self, image_paths, output_dir, split_count, target_width, max_kb, mode='vertical', rows=2, cols=2, output_format='AUTO'):
+    def __init__(self, image_paths, output_dir, split_count, target_width, max_kb, mode='vertical', rows=2, cols=2, output_format='AUTO', custom_name=None):
         super().__init__()
         self.image_paths = image_paths
         self.output_dir = output_dir
         self.split_count = split_count
         self.target_width = target_width
         self.max_kb = max_kb
+        self.target_width = target_width
+        self.max_kb = max_kb
         self.mode = mode
         self.rows = rows
         self.cols = cols
         self.output_format = output_format
+        self.custom_name = custom_name
 
     def run(self):
         try:
-            success, message = stitch_images(self.image_paths, self.output_dir, self.split_count, self.target_width, self.max_kb, self.mode, self.rows, self.cols, self.output_format)
+            success, message = stitch_images(self.image_paths, self.output_dir, self.split_count, self.target_width, self.max_kb, self.mode, self.rows, self.cols, self.output_format, self.custom_name)
             self.finished_signal.emit(success, message)
         except Exception as e:
             self.finished_signal.emit(False, str(e))
@@ -38,7 +41,7 @@ class StitcherThread(QThread):
 class SlicerThread(QThread):
     finished_signal = pyqtSignal(bool, str)
 
-    def __init__(self, image_paths, output_dir, count, smart_mode, target_width, max_kb, direction='horizontal', rows=None, cols=None, output_format='AUTO'):
+    def __init__(self, image_paths, output_dir, count, smart_mode, target_width, max_kb, direction='horizontal', rows=None, cols=None, output_format='AUTO', custom_name=None):
         super().__init__()
         self.image_paths = image_paths
         self.output_dir = output_dir
@@ -50,18 +53,28 @@ class SlicerThread(QThread):
         self.rows = rows
         self.cols = cols
         self.output_format = output_format
+        self.custom_name = custom_name
 
     def run(self):
         success = True
         message = ""
         try:
-            for img_path in self.image_paths:
+            for i, img_path in enumerate(self.image_paths):
+                # Handle custom name for multiple files?
+                # If custom name is "MyPic", multiple input files might conflict or need indexing.
+                # Let's assume custom_name applies mainly to single file slicing or prefixing.
+                # If multiple files, we probably should append index to folder name or similar.
+                
+                c_name = self.custom_name
+                if c_name and len(self.image_paths) > 1:
+                     c_name = f"{c_name}_{i+1}"
+                     
                 if self.direction == 'grid':
                     max_kb_val = self.max_kb if self.max_kb > 0 else None
-                    s, m = slice_grid_image(img_path, self.output_dir, self.rows, self.cols, self.target_width, max_kb_val, self.output_format)
+                    s, m = slice_grid_image(img_path, self.output_dir, self.rows, self.cols, self.target_width, max_kb_val, self.output_format, c_name)
                 else:
                     max_kb_val = self.max_kb if self.max_kb > 0 else None
-                    s, m = slice_image(img_path, self.output_dir, self.count, self.smart_mode, self.target_width, max_kb_val, self.direction, self.output_format)
+                    s, m = slice_image(img_path, self.output_dir, self.count, self.smart_mode, self.target_width, max_kb_val, self.direction, self.output_format, c_name)
                 
                 if not s:
                     success = False
@@ -119,7 +132,7 @@ class ImageMatrixApp(QMainWindow):
         layout = QVBoxLayout(self.merge_tab)
 
         # Drop Label
-        self.merge_drop_label = QLabel("请将图片拖拽到此处\n(支持 .jpg, .jpeg, .png, .psd)")
+        self.merge_drop_label = QLabel("请将图片拖拽到此处\n(支持 .jpg, .jpeg, .png, .pdf)")
         self.merge_drop_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.merge_drop_label.setStyleSheet(self._get_drop_style())
         layout.addWidget(self.merge_drop_label)
@@ -134,6 +147,7 @@ class ImageMatrixApp(QMainWindow):
 
         # Size Selection
         size_group = QGroupBox("导出宽度选择")
+        size_group.setStyleSheet(self._get_group_style())
         size_layout = QHBoxLayout()
         
         self.m_radio_original = QRadioButton("原图")
@@ -165,6 +179,7 @@ class ImageMatrixApp(QMainWindow):
 
         # Export Format Selection
         format_group = QGroupBox("导出格式")
+        format_group.setStyleSheet(self._get_group_style())
         format_layout = QHBoxLayout()
         
         self.m_radio_fmt_auto = QRadioButton("自动 (默认)")
@@ -188,6 +203,7 @@ class ImageMatrixApp(QMainWindow):
 
         # Mode Selection (New)
         mode_group = QGroupBox("拼接模式")
+        mode_group.setStyleSheet(self._get_group_style())
         mode_layout = QVBoxLayout()
         
         mode_btn_layout = QHBoxLayout()
@@ -266,6 +282,7 @@ class ImageMatrixApp(QMainWindow):
 
         # File Size Limit Selection
         limit_group = QGroupBox("图片大小限制 (KB)")
+        limit_group.setStyleSheet(self._get_group_style())
         limit_layout = QVBoxLayout()
         self.m_limit_label = QLabel("大小限制：200 KB (默认)")
         self.m_limit_slider = QSlider(Qt.Orientation.Horizontal)
@@ -283,6 +300,7 @@ class ImageMatrixApp(QMainWindow):
 
         # Split Selection
         self.m_split_group = QGroupBox("分组拼接设置")
+        self.m_split_group.setStyleSheet(self._get_group_style())
         split_layout = QVBoxLayout()
         self.m_split_label = QLabel("拼接成：1 张长图")
         self.m_split_slider = QSlider(Qt.Orientation.Horizontal)
@@ -297,14 +315,27 @@ class ImageMatrixApp(QMainWindow):
 
         layout.addLayout(controls_layout)
 
+        # Filename Input (New)
+        name_group = QGroupBox("导出文件名 (选填)")
+        name_group.setStyleSheet(self._get_group_style())
+        name_layout = QHBoxLayout()
+        self.m_name_input = QLineEdit()
+        self.m_name_input.setPlaceholderText("默认为自动生成的日期时间戳")
+        name_layout.addWidget(self.m_name_input)
+        name_group.setLayout(name_layout)
+        layout.addWidget(name_group)
+
         # Buttons
         btn_layout = QHBoxLayout()
         self.m_clear_btn = QPushButton("清空")
         self.m_clear_btn.clicked.connect(self.clear_merge_list)
+        self.m_clear_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.m_clear_btn.setStyleSheet("padding: 10px;")
         btn_layout.addWidget(self.m_clear_btn)
 
         self.m_start_btn = QPushButton("开始拼接 (保存到桌面)")
         self.m_start_btn.clicked.connect(self.start_stitching)
+        self.m_start_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.m_start_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; padding: 10px;")
         btn_layout.addWidget(self.m_start_btn)
 
@@ -328,6 +359,7 @@ class ImageMatrixApp(QMainWindow):
 
         # 1. Width Selection (Full Row)
         size_group = QGroupBox("导出宽度")
+        size_group.setStyleSheet(self._get_group_style())
         size_layout = QHBoxLayout()
         
         self.s_radio_original = QRadioButton("原图")
@@ -354,6 +386,7 @@ class ImageMatrixApp(QMainWindow):
 
         # 2. Export Format Selection (New)
         format_group = QGroupBox("导出格式")
+        format_group.setStyleSheet(self._get_group_style())
         format_layout = QHBoxLayout()
         
         self.s_radio_fmt_auto = QRadioButton("自动 (默认)")
@@ -393,6 +426,7 @@ class ImageMatrixApp(QMainWindow):
 
         # 3. Settings Group
         slice_group = QGroupBox("切图模式 & 设置")
+        slice_group.setStyleSheet(self._get_group_style())
         slice_inner_layout = QVBoxLayout()
 
         # Direction/Mode Selection
@@ -504,14 +538,27 @@ class ImageMatrixApp(QMainWindow):
 
         layout.addLayout(controls_layout)
 
+        # Filename Input (New)
+        name_group = QGroupBox("导出文件名 (选填)")
+        name_group.setStyleSheet(self._get_group_style())
+        name_layout = QHBoxLayout()
+        self.s_name_input = QLineEdit()
+        self.s_name_input.setPlaceholderText("默认为文件夹/原图名")
+        name_layout.addWidget(self.s_name_input)
+        name_group.setLayout(name_layout)
+        layout.addWidget(name_group)
+
         # Buttons
         btn_layout = QHBoxLayout()
         self.s_clear_btn = QPushButton("清空")
         self.s_clear_btn.clicked.connect(self.clear_slice_list)
+        self.s_clear_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.s_clear_btn.setStyleSheet("padding: 10px;")
         btn_layout.addWidget(self.s_clear_btn)
 
         self.s_start_btn = QPushButton("开始切图 (保存到桌面)")
         self.s_start_btn.clicked.connect(self.start_slicing)
+        self.s_start_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.s_start_btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold; padding: 10px;")
         btn_layout.addWidget(self.s_start_btn)
 
@@ -531,6 +578,22 @@ class ImageMatrixApp(QMainWindow):
                 font-size: 14px;
                 color: #555;
                 background-color: #f0f0f0;
+            }
+        """
+
+    def _get_group_style(self):
+        return """
+            QGroupBox {
+                border: 1px solid #d0d0d0;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 3px;
+                color: #555;
             }
         """
 
@@ -674,7 +737,7 @@ class ImageMatrixApp(QMainWindow):
 
     def dropEvent(self, event: QDropEvent):
         files = [u.toLocalFile() for u in event.mimeData().urls()]
-        valid_extensions = ('.jpg', '.jpeg', '.png', '.psd')
+        valid_extensions = ('.jpg', '.jpeg', '.png', '.pdf')
         new_images = [f for f in files if f.lower().endswith(valid_extensions)]
 
         if not new_images:
@@ -790,7 +853,9 @@ class ImageMatrixApp(QMainWindow):
         self.m_start_btn.setEnabled(False)
         self.m_start_btn.setText("正在拼接... ")
         
-        self.stitch_thread = StitcherThread(self.merge_images, desktop_path, split_count, target_width, limit_val, mode, rows, cols, output_format)
+        custom_name = self.m_name_input.text().strip()
+        
+        self.stitch_thread = StitcherThread(self.merge_images, desktop_path, split_count, target_width, limit_val, mode, rows, cols, output_format, custom_name)
         self.stitch_thread.finished_signal.connect(self.on_stitching_finished)
         self.stitch_thread.start()
 
@@ -881,7 +946,9 @@ class ImageMatrixApp(QMainWindow):
         self.s_start_btn.setEnabled(False)
         self.s_start_btn.setText("正在切图... ")
         
-        self.slicer_thread = SlicerThread(self.slice_images, desktop_path, count, smart_mode, target_width, limit_val, direction, rows, cols, output_format)
+        custom_name = self.s_name_input.text().strip()
+
+        self.slicer_thread = SlicerThread(self.slice_images, desktop_path, count, smart_mode, target_width, limit_val, direction, rows, cols, output_format, custom_name)
         self.slicer_thread.finished_signal.connect(self.on_slicing_finished)
         self.slicer_thread.start()
 

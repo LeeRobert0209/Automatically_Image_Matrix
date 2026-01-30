@@ -66,7 +66,7 @@ def _find_best_cut(image, target_pos, axis='horizontal', search_range=50):
             
     return int(best_pos)
 
-def slice_grid_image(image_path, output_dir, rows, cols, target_width=None, max_kb=None, output_format='AUTO'):
+def slice_grid_image(image_path, output_dir, rows, cols, target_width=None, max_kb=None, output_format='AUTO', custom_name=None):
     """
     Slices an image into rows x cols grid.
     """
@@ -87,6 +87,9 @@ def slice_grid_image(image_path, output_dir, rows, cols, target_width=None, max_
         cell_height = height / rows
         
         base_name = os.path.splitext(os.path.basename(image_path))[0]
+        if custom_name:
+            base_name = custom_name
+            
         specific_output_dir = os.path.join(output_dir, base_name)
         
         if not os.path.exists(specific_output_dir):
@@ -136,7 +139,7 @@ def slice_grid_image(image_path, output_dir, rows, cols, target_width=None, max_
     except Exception as e:
         return False, f"Error grid slicing: {e}"
 
-def slice_image(image_path, output_dir, count=1, smart_mode=False, target_width=None, max_kb=None, direction='horizontal', output_format='AUTO'):
+def slice_image(image_path, output_dir, count=1, smart_mode=False, target_width=None, max_kb=None, direction='horizontal', output_format='AUTO', custom_name=None):
     """
     Slices a single image into 'count' pieces.
     """
@@ -184,7 +187,9 @@ def slice_image(image_path, output_dir, count=1, smart_mode=False, target_width=
         
         # Perform cuts and save
         base_name = os.path.splitext(os.path.basename(image_path))[0]
-        
+        if custom_name:
+            base_name = custom_name
+
         specific_output_dir = os.path.join(output_dir, base_name)
         if not os.path.exists(specific_output_dir):
             try:

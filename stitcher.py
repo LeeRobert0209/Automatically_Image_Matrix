@@ -126,7 +126,7 @@ def _stitch_grid(images, rows, cols, target_width=None):
     return stitched_img
 
 
-def stitch_images(image_paths, output_dir, split_count=1, target_width=None, max_kb=None, mode='vertical', rows=2, cols=2, output_format='AUTO'):
+def stitch_images(image_paths, output_dir, split_count=1, target_width=None, max_kb=None, mode='vertical', rows=2, cols=2, output_format='AUTO', custom_name=None):
     """
     Stitches images based on mode.
     """
@@ -197,13 +197,25 @@ def stitch_images(image_paths, output_dir, split_count=1, target_width=None, max
                 result_img = _stitch_grid(images, rows, cols, target_width)
             
             if result_img:
-                base_name = f"stitched_{mode}_{timestamp}_p{i+1}"
+                if custom_name:
+                    if len(groups) > 1:
+                        base_name = f"{custom_name}_p{i+1}"
+                    else:
+                        base_name = custom_name
+                else:
+                    base_name = f"stitched_{mode}_{timestamp}_p{i+1}"
+                
                 filename = f"{base_name}{ext}"
                 output_path = os.path.join(output_dir, filename)
                 
                 counter = 1
                 while os.path.exists(output_path):
-                    filename = f"{base_name}_{counter}{ext}"
+                    if custom_name:
+                         # Append counter if custom name exists and conflicts
+                        filename = f"{base_name}_{counter}{ext}"
+                    else:
+                        # Existing logic for timestamps (already has p{i+1}) but let's be safe
+                        filename = f"{base_name}_{counter}{ext}"
                     output_path = os.path.join(output_dir, filename)
                     counter += 1
                 
