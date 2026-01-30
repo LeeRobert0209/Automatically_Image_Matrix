@@ -1,3 +1,4 @@
+
 from PIL import Image
 import os
 import math
@@ -5,9 +6,9 @@ import math
 # Disable the DecompressionBombError for large images
 Image.MAX_IMAGE_PIXELS = None
 
-def _stitch_single_group(images, target_width=None):
+def _stitch_vertical(images, target_width=None):
     """
-    Helper function to stitch a list of opened PIL images.
+    Stitch images vertically.
     """
     if not images:
         return None
@@ -22,114 +23,155 @@ def _stitch_single_group(images, target_width=None):
     # Paste images
     current_y = 0
     for img in images:
-        # Center the image horizontally if it's smaller than max_width
+        # Center the image horizontally
         x_offset = (max_width - img.width) // 2
         stitched_img.paste(img, (x_offset, current_y))
         current_y += img.height
 
     # Resize if target_width is specified
     if target_width:
-        # Calculate new height to maintain aspect ratio
         aspect_ratio = total_height / max_width
         new_height = int(target_width * aspect_ratio)
         stitched_img = stitched_img.resize((target_width, new_height), Image.Resampling.LANCZOS)
 
     return stitched_img
 
-def stitch_images(image_paths, output_dir, split_count=1, target_width=None, max_kb=None):
+def _stitch_horizontal(images, target_width=None):
     """
-    Stitches images, splitting them into multiple files to balance total height.
+    Stitch images horizontally. Resizes all to match max height to avoid jagged edges.
+    """
+    if not images:
+        return None
+        
+    # Find max height
+    max_height = max(img.height for img in images)
+    
+    # Resize images to match max_height (preserving aspect ratio)
+    resized_images = []
+    total_width = 0
+    for img in images:
+        if img.height != max_height:
+            aspect = img.width / img.height
+            new_w = int(max_height * aspect)
+            resized = img.resize((new_w, max_height), Image.Resampling.LANCZOS)
+            resized_images.append(resized)
+            total_width += new_w
+        else:
+            resized_images.append(img)
+            total_width += img.width
+            
+    # Create canvas
+    stitched_img = Image.new('RGB', (total_width, max_height), (255, 255, 255))
+    
+    current_x = 0
+    for img in resized_images:
+        stitched_img.paste(img, (current_x, 0))
+        current_x += img.width
+        
+    # Resize if target_width is specified
+    if target_width:
+        aspect_ratio = max_height / total_width
+        new_height = int(target_width * aspect_ratio)
+        stitched_img = stitched_img.resize((target_width, new_height), Image.Resampling.LANCZOS)
+        
+    return stitched_img
+
+def _stitch_grid(images, rows, cols, target_width=None):
+    """
+    Stitch images into a grid rows x cols. 
+    Resizes ALL images to the size of the FIRST image to ensure perfect alignment.
+    """
+    if not images:
+        return None
+        
+    if rows <= 0: rows = 1
+    if cols <= 0: cols = 1
+    
+    # Use first image as reference size
+    ref_w, ref_h = images[0].size
+    
+    # Limit number of images used to rows * cols
+    count = min(len(images), rows * cols)
+    used_images = images[:count]
+    
+    # Create canvas
+    canvas_w = ref_w * cols
+    canvas_h = ref_h * rows
+    stitched_img = Image.new('RGB', (canvas_w, canvas_h), (255, 255, 255))
+    
+    idx = 0
+    for r in range(rows):
+        for c in range(cols):
+            if idx >= len(used_images):
+                break
+                
+            img = used_images[idx]
+            
+            # Resize if needed
+            if img.size != (ref_w, ref_h):
+                img = img.resize((ref_w, ref_h), Image.Resampling.LANCZOS)
+                
+            x = c * ref_w
+            y = r * ref_h
+            stitched_img.paste(img, (x, y))
+            
+            idx += 1
+            
+    # Resize final output
+    if target_width:
+        aspect = canvas_h / canvas_w
+        new_height = int(target_width * aspect)
+        stitched_img = stitched_img.resize((target_width, new_height), Image.Resampling.LANCZOS)
+        
+    return stitched_img
+
+
+def stitch_images(image_paths, output_dir, split_count=1, target_width=None, max_kb=None, mode='vertical', rows=2, cols=2, output_format='AUTO'):
+    """
+    Stitches images based on mode.
     """
     if not image_paths:
         return False, "No images to stitch."
 
     total_images = len(image_paths)
-    if split_count > total_images:
-        split_count = total_images
     
-    # 1. Pre-calculate heights
-    image_infos = [] # List of (path, width, height)
-    total_height = 0
-    
-    try:
-        for path in image_paths:
-            with Image.open(path) as img:
-                # We need to consider the width if we are going to resize later?
-                # Actually, for splitting purposes, we assume they will be stitched to same width.
-                # So we can just use aspect ratio to normalize height to a common width (e.g. 1000)
-                # But simpler: just use raw height if widths are similar. 
-                # Better: normalize height to a standard width.
-                norm_width = 1000
-                aspect = img.height / img.width
-                norm_height = norm_width * aspect
-                
-                image_infos.append({
-                    'path': path,
-                    'norm_height': norm_height
-                })
-                total_height += norm_height
-    except Exception as e:
-        return False, f"Error reading image dimensions: {e}"
-
-    # 2. Determine split points
-    target_height_per_group = total_height / split_count
-    
+    # Simple Grouping Logic (Consistent with previous step)
     groups = []
-    current_group = []
-    current_group_height = 0
     
-    # We need to create exactly 'split_count' groups.
-    # This is a linear partitioning problem. We'll use a greedy approach for simplicity
-    # but ensure we don't run out of images for the last groups.
-    
-    img_idx = 0
-    for group_idx in range(split_count):
-        # If it's the last group, take everything remaining
-        if group_idx == split_count - 1:
-            groups.append(image_paths[img_idx:])
-            break
-            
-        current_group = []
-        current_group_height = 0
-        
-        while img_idx < total_images:
-            # Check if we must save images for remaining groups
-            remaining_images = total_images - img_idx
-            remaining_groups = split_count - group_idx
-            if remaining_images <= remaining_groups - 1:
-                 # Must stop to leave at least 1 image for each remaining group
-                 break
+    if mode == 'grid':
+        groups = [image_paths]
+    else:
+        if split_count > 1:
+            avg = len(image_paths) // split_count
+            remainder = len(image_paths) % split_count
+            start = 0
+            for i in range(split_count):
+                count = avg + (1 if i < remainder else 0)
+                groups.append(image_paths[start:start+count])
+                start += count
+        else:
+            groups = [image_paths]
 
-            info = image_infos[img_idx]
-            
-            # Check if adding this image makes us closer to target or further?
-            # If current is empty, must add.
-            if not current_group:
-                current_group.append(info['path'])
-                current_group_height += info['norm_height']
-                img_idx += 1
-                continue
-            
-            # Calculate difference if we add vs if we don't
-            diff_without = abs(target_height_per_group - current_group_height)
-            diff_with = abs(target_height_per_group - (current_group_height + info['norm_height']))
-            
-            if diff_with < diff_without:
-                # Adding makes it closer (or equal), so add it
-                current_group.append(info['path'])
-                current_group_height += info['norm_height']
-                img_idx += 1
-            else:
-                # Adding makes it worse (too tall), so stop here
-                break
-        
-        groups.append(current_group)
-
-    # 3. Stitch each group
     saved_files = []
     try:
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d")
+
+        # Determine Extension
+        ext = ".jpg" # Default
+        fmt_arg = 'JPEG'
+        
+        if output_format == 'PNG':
+            ext = ".png"
+            fmt_arg = 'PNG'
+        elif output_format == 'PDF':
+            ext = ".pdf"
+            fmt_arg = 'PDF'
+        elif output_format == 'AUTO':
+            # Use source extension if possible? Or just default to JPG for ease.
+            # Let's default to JPG unless user explicit.
+            ext = ".jpg"
+            fmt_arg = 'JPEG'
 
         for i, group_paths in enumerate(groups):
             if not group_paths:
@@ -146,28 +188,31 @@ def stitch_images(image_paths, output_dir, split_count=1, target_width=None, max
             if not images:
                 continue
 
-            result_img = _stitch_single_group(images, target_width)
+            result_img = None
+            if mode == 'vertical':
+                result_img = _stitch_vertical(images, target_width)
+            elif mode == 'horizontal':
+                result_img = _stitch_horizontal(images, target_width)
+            elif mode == 'grid':
+                result_img = _stitch_grid(images, rows, cols, target_width)
             
             if result_img:
-                # Generate base filename without time (e.g., stitched_20231027_p1.jpg)
-                base_name = f"stitched_{timestamp}_p{i+1}"
-                ext = ".jpg"
+                base_name = f"stitched_{mode}_{timestamp}_p{i+1}"
                 filename = f"{base_name}{ext}"
                 output_path = os.path.join(output_dir, filename)
                 
-                # Check for existing file and append counter if needed
                 counter = 1
                 while os.path.exists(output_path):
                     filename = f"{base_name}_{counter}{ext}"
                     output_path = os.path.join(output_dir, filename)
                     counter += 1
                 
-                # Use the new compression utility
                 from utils import save_compressed_image
-                save_compressed_image(result_img, output_path, max_kb)
+                # Pass format explicitly
+                save_compressed_image(result_img, output_path, max_kb, output_format=fmt_arg)
                 saved_files.append(filename)
 
-        return True, f"Successfully created {len(saved_files)} images."
+        return True, f"Successfully created {len(saved_files)} images ({mode}, {output_format})."
 
     except Exception as e:
         return False, f"Error during stitching: {e}"
