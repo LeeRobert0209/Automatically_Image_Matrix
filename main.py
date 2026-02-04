@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 from datetime import datetime
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QListWidget, QLabel, 
@@ -12,6 +13,80 @@ from sorter import sort_files
 from stitcher import stitch_images
 from grid_preview import PreviewDialog
 from slicer import slice_image, slice_grid_image
+from merger import merge_images_to_pdf
+from PyQt6.QtGui import QPixmap, QCursor
+from PyQt6.QtCore import QTimer, QPoint
+
+class PreviewListWidget(QListWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.timeout.connect(self.show_preview)
+        self.hover_item = None
+        self.preview_label = None
+        
+        self.itemEntered.connect(self.on_item_entered)
+        # We need to detect when mouse leaves item to stop timer
+        # itemEntered triggers when mouse MOVES onto an item.
+        
+    def on_item_entered(self, item):
+        self.hide_preview() # Hide previous if any
+        self.hover_item = item
+        self.preview_timer.start(2000) # 2 seconds
+        
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        # If we moved, we might need to reset or check if we are still on same item?
+        # itemEntered handles switching items.
+        # But if we move OUT of an item to whitespace?
+        item = self.itemAt(event.pos())
+        if item != self.hover_item:
+            self.hover_item = item
+            self.hide_preview()
+            self.preview_timer.stop()
+            if item:
+                self.preview_timer.start(2000)
+    
+    def leaveEvent(self, event):
+        self.hide_preview()
+        self.preview_timer.stop()
+        self.hover_item = None
+        super().leaveEvent(event)
+        
+    def show_preview(self):
+        if not self.hover_item:
+            return
+            
+        path = self.hover_item.data(Qt.ItemDataRole.UserRole)
+        if not path or not os.path.exists(path):
+            return
+            
+        # Create Popup
+        if self.preview_label is None:
+            self.preview_label = QLabel(self, windowFlags=Qt.WindowType.ToolTip)
+            self.preview_label.setStyleSheet("border: 2px solid #333; background: white;")
+            self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        # Load and scale image
+        try:
+            pixmap = QPixmap(path)
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(200, 200, Qt.AspectRatioMode.KeepAspectRatio)
+                self.preview_label.setPixmap(scaled)
+                self.preview_label.adjustSize()
+                
+                # Position near cursor
+                pos = QCursor.pos()
+                self.preview_label.move(pos.x() + 20, pos.y() + 20)
+                self.preview_label.show()
+        except Exception:
+            pass
+
+    def hide_preview(self):
+        if self.preview_label:
+            self.preview_label.hide()
 
 class StitcherThread(QThread):
     finished_signal = pyqtSignal(bool, str)
@@ -34,6 +109,22 @@ class StitcherThread(QThread):
     def run(self):
         try:
             success, message = stitch_images(self.image_paths, self.output_dir, self.split_count, self.target_width, self.max_kb, self.mode, self.rows, self.cols, self.output_format, self.custom_name)
+            self.finished_signal.emit(success, message)
+        except Exception as e:
+            self.finished_signal.emit(False, str(e))
+
+class MergerThread(QThread):
+    finished_signal = pyqtSignal(bool, str)
+
+    def __init__(self, image_paths, output_path, max_kb):
+        super().__init__()
+        self.image_paths = image_paths
+        self.output_path = output_path
+        self.max_kb = max_kb
+
+    def run(self):
+        try:
+            success, message = merge_images_to_pdf(self.image_paths, self.output_path, self.max_kb)
             self.finished_signal.emit(success, message)
         except Exception as e:
             self.finished_signal.emit(False, str(e))
@@ -100,9 +191,13 @@ class ImageMatrixApp(QMainWindow):
         # Data storage
         self.merge_images = []
         self.slice_images = []
+        # Store full items in the widget for combine tab to support reordering
+        # But we still need a list to track dropping? 
+        # Actually for combine tab we update the widget directly with UserRole
         
         self.stitch_thread = None
         self.slicer_thread = None
+        self.merger_thread = None
 
         self.initUI()
 
@@ -124,6 +219,11 @@ class ImageMatrixApp(QMainWindow):
         self.slice_tab = QWidget()
         self.init_slice_tab()
         self.tabs.addTab(self.slice_tab, "切图 (Slice)")
+
+        # Tab 3: Combine
+        self.combine_tab = QWidget()
+        self.init_combine_tab()
+        self.tabs.addTab(self.combine_tab, "合图 (Combine)")
 
         # Global Enable Drag & Drop
         self.setAcceptDrops(True)
@@ -568,6 +668,99 @@ class ImageMatrixApp(QMainWindow):
         self.setup_list_actions(self.merge_list, self.delete_merge_items, self.rename_merge_items)
         self.setup_list_actions(self.slice_list, self.delete_slice_items, self.rename_slice_items)
 
+    def init_combine_tab(self):
+        layout = QVBoxLayout(self.combine_tab)
+
+        # Drop Label
+        self.combine_drop_label = QLabel("请将文件拖拽到此处\n(支持 .jpg, .png, .pdf)\n列表支持拖拽调整顺序")
+        self.combine_drop_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.combine_drop_label.setStyleSheet(self._get_drop_style())
+        layout.addWidget(self.combine_drop_label)
+
+        # List Widget
+        self.combine_list = PreviewListWidget()
+        self.combine_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.combine_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.combine_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        layout.addWidget(self.combine_list)
+
+        # Controls
+        controls_layout = QVBoxLayout()
+        
+        # Sorting Group (New)
+        sort_group = QGroupBox("排序 (Sort)")
+        sort_group.setStyleSheet(self._get_group_style())
+        sort_layout = QHBoxLayout()
+        
+        btn_sort_name_asc = QPushButton("名称 A-Z")
+        btn_sort_name_asc.clicked.connect(lambda: self.sort_combine_list('name', True))
+        
+        btn_sort_name_desc = QPushButton("名称 Z-A")
+        btn_sort_name_desc.clicked.connect(lambda: self.sort_combine_list('name', False))
+        
+        btn_sort_size_asc = QPushButton("大小 小->大")
+        btn_sort_size_asc.clicked.connect(lambda: self.sort_combine_list('size', True))
+        
+        btn_sort_size_desc = QPushButton("大小 大->小")
+        btn_sort_size_desc.clicked.connect(lambda: self.sort_combine_list('size', False))
+        
+        sort_layout.addWidget(btn_sort_name_asc)
+        sort_layout.addWidget(btn_sort_name_desc)
+        sort_layout.addWidget(btn_sort_size_asc)
+        sort_layout.addWidget(btn_sort_size_desc)
+        
+        sort_group.setLayout(sort_layout)
+        controls_layout.addWidget(sort_group)
+        
+        # Limit Group
+        limit_layout = QHBoxLayout()
+        self.c_limit_label = QLabel("单页限制: 1 MB")
+        self.c_limit_slider = QSlider(Qt.Orientation.Horizontal)
+        self.c_limit_slider.setMinimum(0)
+        self.c_limit_slider.setMaximum(5)
+        self.c_limit_slider.setValue(1) # Default to index 1 -> 1MB? Or 0? Let's say 1
+        self.c_limit_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.c_limit_slider.setTickInterval(1)
+        self.c_limit_slider.valueChanged.connect(lambda v: self.update_limit_label_new(v, self.c_limit_label))
+        
+        limit_layout.addWidget(self.c_limit_label)
+        limit_layout.addWidget(self.c_limit_slider)
+        
+        limit_group = QGroupBox("PDF大小限制 (Compress)")
+        limit_group.setStyleSheet(self._get_group_style())
+        limit_group.setLayout(limit_layout)
+        controls_layout.addWidget(limit_group)
+
+        # Filename Input
+        name_group = QGroupBox("导出文件名 (选填)")
+        name_group.setStyleSheet(self._get_group_style())
+        name_layout = QHBoxLayout()
+        self.c_name_input = QLineEdit()
+        self.c_name_input.setPlaceholderText("默认为 combine_日期.pdf")
+        name_layout.addWidget(self.c_name_input)
+        name_group.setLayout(name_layout)
+        controls_layout.addWidget(name_group)
+
+        layout.addLayout(controls_layout)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        self.c_clear_btn = QPushButton("清空")
+        self.c_clear_btn.clicked.connect(self.clear_combine_list)
+        self.c_clear_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.c_clear_btn.setStyleSheet("padding: 10px;")
+        btn_layout.addWidget(self.c_clear_btn)
+
+        self.c_start_btn = QPushButton("开始合并 (保存到桌面)")
+        self.c_start_btn.clicked.connect(self.start_combining)
+        self.c_start_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.c_start_btn.setStyleSheet("background-color: #FF9800; color: white; font-weight: bold; padding: 10px;")
+        btn_layout.addWidget(self.c_start_btn)
+
+        layout.addLayout(btn_layout)
+        
+        self.setup_list_actions(self.combine_list, self.delete_combine_items, self.rename_combine_items)
+
 
     def _get_drop_style(self):
         return """
@@ -607,6 +800,8 @@ class ImageMatrixApp(QMainWindow):
                 self.delete_merge_items()
             elif self.tabs.currentIndex() == 1 and self.slice_list.hasFocus():
                 self.delete_slice_items()
+            elif self.tabs.currentIndex() == 2 and self.combine_list.hasFocus():
+                self.delete_combine_items()
         super().keyPressEvent(event)
 
     def show_context_menu(self, pos, list_widget, delete_slot, rename_slot):
@@ -716,8 +911,22 @@ class ImageMatrixApp(QMainWindow):
             
             if self.s_radio_h.isChecked():
                 self.s_count_label.setText(f"切成：{val} 行 (每份高度自动计算)")
-            else:
-                self.s_count_label.setText(f"切成：{val} 列 (每份宽度自动计算)")
+    def _get_limit_mb(self, value):
+        # 0: Unlimited
+        # 1: 1 MB
+        # 2: 5 MB
+        # 3: 10 MB
+        # 4: 20 MB
+        # 5: 50 MB
+        mapping = {0: 0, 1: 1, 2: 5, 3: 10, 4: 20, 5: 50}
+        return mapping.get(value, 0)
+
+    def update_limit_label_new(self, value, label_widget):
+        mb = self._get_limit_mb(value)
+        if mb == 0:
+            label_widget.setText("单页限制: 不限 (Unlimited)")
+        else:
+            label_widget.setText(f"单页限制: {mb} MB")
 
     def update_limit_label(self, value, label_widget):
         kb_val = value * 200
@@ -750,12 +959,19 @@ class ImageMatrixApp(QMainWindow):
             self.merge_images = sort_files(list(combined_set))
             self.update_merge_list()
             self.m_split_slider.setMaximum(max(1, len(self.merge_images)))
-        else: # Slice Tab
+        elif current_index == 1: # Slice Tab
             # For slicing, order matters less, just append
             for img in new_images:
                 if img not in self.slice_images:
                     self.slice_images.append(img)
             self.update_slice_list()
+        elif current_index == 2: # Combine Tab
+            for img in new_images:
+                # Add to widget directly
+                from PyQt6.QtWidgets import QListWidgetItem
+                item = QListWidgetItem(os.path.basename(img))
+                item.setData(Qt.ItemDataRole.UserRole, img)
+                self.combine_list.addItem(item)
             # Select the last added item effectively? Or just leave as is.
 
     def update_merge_list(self):
@@ -777,6 +993,81 @@ class ImageMatrixApp(QMainWindow):
     def clear_slice_list(self):
         self.slice_images = []
         self.slice_list.clear()
+
+    def clear_combine_list(self):
+        self.combine_list.clear()
+
+    def delete_combine_items(self):
+        items = self.combine_list.selectedItems()
+        for item in items:
+            self.combine_list.takeItem(self.combine_list.row(item))
+
+    def rename_combine_items(self):
+        # Rename logic for combine tab - just changes the display text, not the file?
+        pass
+
+    def sort_combine_list(self, key, ascending):
+        count = self.combine_list.count()
+        if count < 2:
+            return
+            
+        items = []
+        for i in range(count):
+            items.append(self.combine_list.item(i))
+            
+        if key == 'name':
+            items.sort(key=lambda x: x.text().lower(), reverse=not ascending)
+        elif key == 'size':
+            # Need to get file size from path
+            def get_size(item):
+                path = item.data(Qt.ItemDataRole.UserRole)
+                if path and os.path.exists(path):
+                    return os.path.getsize(path)
+                return 0
+            items.sort(key=get_size, reverse=not ascending)
+        
+        # Actually simplest way is takeItem and insert
+        for item in items:
+            self.combine_list.takeItem(self.combine_list.row(item))
+            
+        for item in items:
+            self.combine_list.addItem(item)
+
+    def sort_combine_list(self, key, ascending):
+        count = self.combine_list.count()
+        if count < 2:
+            return
+            
+        items = []
+        for i in range(count):
+            items.append(self.combine_list.item(i))
+            
+        if key == 'name':
+            # Natural Sort Key
+            def natural_key(item):
+                text = item.text().lower()
+                return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', text)]
+            
+            items.sort(key=natural_key, reverse=not ascending)
+        elif key == 'size':
+            # Need to get file size from path
+            def get_size(item):
+                path = item.data(Qt.ItemDataRole.UserRole)
+                if path and os.path.exists(path):
+                    return os.path.getsize(path)
+                return 0
+            items.sort(key=get_size, reverse=not ascending)
+            
+        # Re-populate
+        # self.combine_list.clear() # Clear deletes items? Yes.
+        # Taking items out might be safer
+        
+        # Actually simplest way is takeItem and insert
+        for item in items:
+            self.combine_list.takeItem(self.combine_list.row(item))
+            
+        for item in items:
+            self.combine_list.addItem(item)
 
     # --- Actions ---
 
@@ -959,6 +1250,63 @@ class ImageMatrixApp(QMainWindow):
             QMessageBox.information(self, "完成", message)
         else:
             QMessageBox.warning(self, "注意", message)
+
+    def start_combining(self):
+        if self.combine_list.count() == 0:
+            QMessageBox.warning(self, "提示", "请先添加图片！")
+            return
+
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+        
+        # Get Items in Order
+        paths = []
+        for i in range(self.combine_list.count()):
+            item = self.combine_list.item(i)
+            # Retrieve path from tool tip or data? We set UserRole in dropEvent
+            path = item.data(Qt.ItemDataRole.UserRole) 
+            if path:
+                paths.append(path)
+        
+        if not paths:
+             QMessageBox.warning(self, "提示", "列表为空或数据异常。")
+             return
+             
+        # Settings
+        limit_mb = self._get_limit_mb(self.c_limit_slider.value())
+        limit_val = limit_mb * 1024 # Convert to KB
+        
+        custom_name = self.c_name_input.text().strip()
+        if not custom_name:
+             from datetime import datetime
+             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+             custom_name = f"combine_{timestamp}.pdf"
+        
+        if not custom_name.lower().endswith(".pdf"):
+            custom_name += ".pdf"
+            
+        output_file_path = os.path.join(desktop_path, custom_name)
+        
+        # Check overwrite logic
+        counter = 1
+        base_name, ext = os.path.splitext(custom_name)
+        while os.path.exists(output_file_path):
+            output_file_path = os.path.join(desktop_path, f"{base_name}_{counter}{ext}")
+            counter += 1
+
+        self.c_start_btn.setEnabled(False)
+        self.c_start_btn.setText("正在合并... ")
+        
+        self.merger_thread = MergerThread(paths, output_file_path, limit_val)
+        self.merger_thread.finished_signal.connect(self.on_combining_finished)
+        self.merger_thread.start()
+
+    def on_combining_finished(self, success, message):
+        self.c_start_btn.setEnabled(True)
+        self.c_start_btn.setText("开始合并 (保存到桌面)")
+        if success:
+            QMessageBox.information(self, "成功", f"{message}")
+        else:
+            QMessageBox.critical(self, "错误", f"合并失败：\n{message}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
