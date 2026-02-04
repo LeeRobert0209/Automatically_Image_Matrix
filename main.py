@@ -672,7 +672,7 @@ class ImageMatrixApp(QMainWindow):
         layout = QVBoxLayout(self.combine_tab)
 
         # Drop Label
-        self.combine_drop_label = QLabel("请将文件拖拽到此处\n(支持 .jpg, .png, .pdf)\n列表支持拖拽调整顺序")
+        self.combine_drop_label = QLabel("请将文件或文件夹拖拽到此处\n(支持 .jpg, .png, .pdf)\n列表支持拖拽调整顺序")
         self.combine_drop_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.combine_drop_label.setStyleSheet(self._get_drop_style())
         layout.addWidget(self.combine_drop_label)
@@ -947,10 +947,19 @@ class ImageMatrixApp(QMainWindow):
     def dropEvent(self, event: QDropEvent):
         files = [u.toLocalFile() for u in event.mimeData().urls()]
         valid_extensions = ('.jpg', '.jpeg', '.png', '.pdf')
-        new_images = [f for f in files if f.lower().endswith(valid_extensions)]
+        
+        new_images = []
+        for path in files:
+            if os.path.isfile(path) and path.lower().endswith(valid_extensions):
+                new_images.append(path)
+            elif os.path.isdir(path):
+                for root, _, filenames in os.walk(path):
+                    for fname in filenames:
+                        if fname.lower().endswith(valid_extensions):
+                            new_images.append(os.path.join(root, fname))
 
         if not new_images:
-            QMessageBox.warning(self, "无效文件", "请只拖入支持的图片文件 (.jpg, .png, .psd)")
+            QMessageBox.warning(self, "无效文件", "未找到支持的文件 (.jpg, .png, .pdf)")
             return
 
         current_index = self.tabs.currentIndex()

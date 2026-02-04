@@ -96,7 +96,7 @@ def merge_images_to_pdf(image_paths, output_path, max_kb_per_page=None):
         # Alternatively, we can pass quality=... here too? 
         # PIL PDF driver uses 'quality' arg if available.
         
-        base_image.save(output_path, "PDF", resolution=72.0, save_all=True, append_images=other_images)
+        base_image.save(output_path, "PDF", resolution=100.0, save_all=True, append_images=other_images, quality=95)
         
         return True, f"Successfully merged {len(images_to_save)} images into {os.path.basename(output_path)}"
         
