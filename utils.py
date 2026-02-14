@@ -14,8 +14,6 @@ def save_compressed_image(image, output_path, max_kb=None, output_format=None):
         output_format (str, optional): 'JPEG', 'PNG', 'PDF' etc.
     """
     # 1. Determine Format if not given
-    # Usually infer from extension, but if output_format is explicit, use it.
-    
     ext = os.path.splitext(output_path)[1].lower()
     if output_format:
         fmt = output_format.upper()
@@ -29,29 +27,25 @@ def save_compressed_image(image, output_path, max_kb=None, output_format=None):
         else:
             fmt = 'JPEG' # Default
             
-    # For PDF, we usually save as JPEG inside PDF for compression
-    # For PNG, compression is lossless (optimization level), quality param ignored usually.
-    
+    # Common settings
     quality = 95
+    dpi = image.info.get('dpi') # Preserve DPI
     
     # PDF Logic
     if fmt == 'PDF':
-        # PDF saving in PIL: image.save(f, "PDF", resolution=100.0, save_all=True...)
-        # But for size constraint, we must compress the IMAGE first?
-        # Actually PIL PDF saving might re-encode.
-        # If we want small PDF, converting to 'RGB' and saving as PDF usually uses JPEG compression for RGB images.
         if image.mode != 'RGB':
              image = image.convert('RGB')
-             
+        
+        # Determine resolution for PDF (default to 72 if not present, or use image's DPI)
+        resolution = 72.0
+        if dpi:
+            # dpi can be a tuple (x, y)
+            resolution = float(dpi[0]) if isinstance(dpi, tuple) else float(dpi)
+
         if not max_kb or max_kb <= 0:
-            image.save(output_path, "PDF", resolution=72.0, quality=quality)
+            image.save(output_path, "PDF", resolution=resolution, quality=quality)
             return
             
-        # Strategy for PDF size limit:
-        # It's hard to predict PDF overhead. But we can compress the image data conceptually.
-        # Simple iterative quality reduction using temporary buffer or just quality param.
-        # PIL's PDF writer respects 'quality' if the content is JPEG compressed.
-        
         target_bytes = max_kb * 1024
         
         min_q = 10
@@ -62,7 +56,7 @@ def save_compressed_image(image, output_path, max_kb=None, output_format=None):
         while min_q <= max_q:
             mid_q = (min_q + max_q) // 2
             buf = io.BytesIO()
-            image.save(buf, "PDF", resolution=72.0, quality=mid_q)
+            image.save(buf, "PDF", resolution=resolution, quality=mid_q)
             size = buf.tell()
             
             if size <= target_bytes:
@@ -71,15 +65,15 @@ def save_compressed_image(image, output_path, max_kb=None, output_format=None):
             else:
                 max_q = mid_q - 1
                 
-        image.save(output_path, "PDF", resolution=72.0, quality=best_q)
+        image.save(output_path, "PDF", resolution=resolution, quality=best_q)
         return
 
-    # PNG Logic (No quality param for size targeting really, use maximize optimization?)
+    # PNG Logic (Lossless, ignore max_kb usually)
     if fmt == 'PNG':
-        # PNG is lossless. max_kb is hard to enforce without resizing.
-        # We will ignore max_kb for PNG unless we decide to resize, but prompt implies quality/compression.
-        # Let's just save optimized.
-        image.save(output_path, "PNG", optimize=True)
+        if dpi:
+            image.save(output_path, "PNG", optimize=True, dpi=dpi)
+        else:
+            image.save(output_path, "PNG", optimize=True)
         return
 
     # JPEG Logic (Standard)
@@ -87,18 +81,20 @@ def save_compressed_image(image, output_path, max_kb=None, output_format=None):
         if image.mode != 'RGB':
             image = image.convert('RGB')
             
+        # Use subsampling=0 (4:4:4) to prevent color bleed/blurriness
+        save_kwargs = {'quality': quality, 'subsampling': 0}
+        if dpi:
+            save_kwargs['dpi'] = dpi
+
         if not max_kb or max_kb <= 0:
-            image.save(output_path, "JPEG", quality=quality)
+            image.save(output_path, "JPEG", **save_kwargs)
             return
 
         target_bytes = max_kb * 1024
         
-        # Try different qualities
-        # Fast recursive check
-        
         # Check current quality=95
         buf = io.BytesIO()
-        image.save(buf, "JPEG", quality=quality)
+        image.save(buf, "JPEG", **save_kwargs)
         if buf.tell() <= target_bytes:
             with open(output_path, "wb") as f:
                 f.write(buf.getvalue())
@@ -112,11 +108,19 @@ def save_compressed_image(image, output_path, max_kb=None, output_format=None):
         while min_q <= max_q:
             mid_q = (min_q + max_q) // 2
             buf = io.BytesIO()
-            image.save(buf, "JPEG", quality=mid_q)
+            # Update quality in kwargs
+            # NOTE: We maintain subsampling=0 and dpi for consistency
+            current_kwargs = save_kwargs.copy()
+            current_kwargs['quality'] = mid_q
+            
+            image.save(buf, "JPEG", **current_kwargs)
+            
             if buf.tell() <= target_bytes:
                 best_q = mid_q
                 min_q = mid_q + 1
             else:
                 max_q = mid_q - 1
         
-        image.save(output_path, "JPEG", quality=best_q)
+        final_kwargs = save_kwargs.copy()
+        final_kwargs['quality'] = best_q
+        image.save(output_path, "JPEG", **final_kwargs)
