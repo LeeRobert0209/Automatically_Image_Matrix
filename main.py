@@ -14,6 +14,7 @@ from stitcher import stitch_images
 from grid_preview import PreviewDialog
 from slicer import slice_image, slice_grid_image
 from merger import merge_images_to_pdf
+from converter import convert_pdf_to_images, convert_psd_to_images, convert_ppt_to_images
 from PyQt6.QtGui import QPixmap, QCursor
 from PyQt6.QtCore import QTimer, QPoint
 
@@ -129,6 +130,48 @@ class MergerThread(QThread):
         except Exception as e:
             self.finished_signal.emit(False, str(e))
 
+class ConverterThread(QThread):
+    finished_signal = pyqtSignal(bool, str)
+
+    def __init__(self, file_paths, output_dir, output_format):
+        super().__init__()
+        self.file_paths = file_paths
+        self.output_dir = output_dir
+        self.output_format = output_format
+
+    def run(self):
+        success_count = 0
+        fail_count = 0
+        details = ""
+
+        try:
+            for path in self.file_paths:
+                ext = os.path.splitext(path)[1].lower()
+                res = False
+                msg = ""
+                
+                if ext == '.pdf':
+                    res, msg = convert_pdf_to_images(path, self.output_dir, self.output_format)
+                elif ext == '.psd':
+                    res, msg = convert_psd_to_images(path, self.output_dir, self.output_format)
+                elif ext in ['.ppt', '.pptx']:
+                    res, msg = convert_ppt_to_images(path, self.output_dir, self.output_format)
+                else:
+                    msg = "Unsupported format"
+                
+                if res:
+                    success_count += 1
+                    details += f"\n[成功] {os.path.basename(path)}: {msg}"
+                else:
+                    fail_count += 1
+                    details += f"\n[失败] {os.path.basename(path)}: {msg}"
+
+            final_msg = f"处理完成: 成功 {success_count} 个, 失败 {fail_count} 个。\n{details}"
+            self.finished_signal.emit(fail_count == 0, final_msg)
+
+        except Exception as e:
+            self.finished_signal.emit(False, str(e))
+
 class SlicerThread(QThread):
     finished_signal = pyqtSignal(bool, str)
 
@@ -198,6 +241,9 @@ class ImageMatrixApp(QMainWindow):
         self.stitch_thread = None
         self.slicer_thread = None
         self.merger_thread = None
+        self.converter_thread = None
+        
+        self.convert_files = []
 
         self.initUI()
 
@@ -224,6 +270,11 @@ class ImageMatrixApp(QMainWindow):
         self.combine_tab = QWidget()
         self.init_combine_tab()
         self.tabs.addTab(self.combine_tab, "合图 (Combine)")
+
+        # Tab 4: Convert (Extract)
+        self.convert_tab = QWidget()
+        self.init_convert_tab()
+        self.tabs.addTab(self.convert_tab, "导图 (Convert)")
 
         # Global Enable Drag & Drop
         self.setAcceptDrops(True)
@@ -381,20 +432,50 @@ class ImageMatrixApp(QMainWindow):
         self.m_radio_grid.toggled.connect(self.update_merge_ui_text)
 
         # File Size Limit Selection
+        # File Size Limit Selection
         limit_group = QGroupBox("图片大小限制 (KB)")
         limit_group.setStyleSheet(self._get_group_style())
         limit_layout = QVBoxLayout()
-        self.m_limit_label = QLabel("大小限制：200 KB (默认)")
+        
+        # New Limit UI with Radio Buttons
+        self.m_radio_limit_preset = QRadioButton("预设: 150 KB")
+        self.m_radio_limit_preset.setChecked(True)
         self.m_limit_slider = QSlider(Qt.Orientation.Horizontal)
         self.m_limit_slider.setMinimum(0)
-        self.m_limit_slider.setMaximum(5) # 0, 1, 2, 3, 4, 5 -> Unlimited, 200, 400, 600, 800, 1000
-        self.m_limit_slider.setValue(1) # Default 200KB
+        self.m_limit_slider.setMaximum(5) # 0:Unlimited, 1:150, 2:300, 3:500, 4:750, 5:1000
+        self.m_limit_slider.setValue(1)
         self.m_limit_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.m_limit_slider.setTickInterval(1)
-        self.m_limit_slider.valueChanged.connect(lambda v: self.update_limit_label(v, self.m_limit_label))
+        self.m_limit_slider.valueChanged.connect(lambda v: self.update_limit_label(v, self.m_radio_limit_preset))
         
-        limit_layout.addWidget(self.m_limit_label)
-        limit_layout.addWidget(self.m_limit_slider)
+        # When slider interacts, auto-check preset radio
+        self.m_limit_slider.sliderPressed.connect(lambda: self.m_radio_limit_preset.setChecked(True))
+        
+        self.m_radio_limit_custom = QRadioButton("自定义:")
+        self.m_limit_custom_input = QLineEdit()
+        self.m_limit_custom_input.setPlaceholderText("KB")
+        self.m_limit_custom_input.setValidator(QIntValidator(1, 20000))
+        self.m_limit_custom_input.setFixedWidth(60)
+        self.m_limit_custom_input.setEnabled(False)
+        self.m_radio_limit_custom.toggled.connect(lambda c: self.m_limit_custom_input.setEnabled(c))
+        
+        limit_btn_group = QButtonGroup(self.merge_tab)
+        limit_btn_group.addButton(self.m_radio_limit_preset)
+        limit_btn_group.addButton(self.m_radio_limit_custom)
+        
+        # Layout row 1: Radio + Slider
+        row1 = QHBoxLayout()
+        row1.addWidget(self.m_radio_limit_preset)
+        row1.addWidget(self.m_limit_slider)
+        
+        # Layout row 2: Radio + Input
+        row2 = QHBoxLayout()
+        row2.addWidget(self.m_radio_limit_custom)
+        row2.addWidget(self.m_limit_custom_input)
+        row2.addStretch()
+        
+        limit_layout.addLayout(row1)
+        limit_layout.addLayout(row2)
         limit_group.setLayout(limit_layout)
         controls_layout.addWidget(limit_group)
 
@@ -508,21 +589,48 @@ class ImageMatrixApp(QMainWindow):
         format_group.setLayout(format_layout)
         controls_layout.addWidget(format_group)
 
-        # 2. Limit (Reduced height usage)
-        limit_layout = QHBoxLayout()
-        self.s_limit_label = QLabel("限大小: 200K")
-        self.s_limit_label.setFixedWidth(100)
+        # 2. Limit (Group Box style similar to Merge Tab)
+        limit_group = QGroupBox("图片大小限制 (KB)")
+        limit_group.setStyleSheet(self._get_group_style())
+        limit_layout = QVBoxLayout()
+
+        self.s_radio_limit_preset = QRadioButton("预设: 150 KB")
+        self.s_radio_limit_preset.setChecked(True)
         self.s_limit_slider = QSlider(Qt.Orientation.Horizontal)
         self.s_limit_slider.setMinimum(0)
         self.s_limit_slider.setMaximum(5)
         self.s_limit_slider.setValue(1)
         self.s_limit_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self.s_limit_slider.setTickInterval(1)
-        self.s_limit_slider.valueChanged.connect(lambda v: self.update_limit_label(v, self.s_limit_label))
+        self.s_limit_slider.valueChanged.connect(lambda v: self.update_limit_label(v, self.s_radio_limit_preset))
+        self.s_limit_slider.sliderPressed.connect(lambda: self.s_radio_limit_preset.setChecked(True))
+
+        self.s_radio_limit_custom = QRadioButton("自定义:")
+        self.s_limit_custom_input = QLineEdit()
+        self.s_limit_custom_input.setPlaceholderText("KB")
+        self.s_limit_custom_input.setValidator(QIntValidator(1, 20000))
+        self.s_limit_custom_input.setFixedWidth(60)
+        self.s_limit_custom_input.setEnabled(False)
+        self.s_radio_limit_custom.toggled.connect(lambda c: self.s_limit_custom_input.setEnabled(c))
         
-        limit_layout.addWidget(self.s_limit_label)
-        limit_layout.addWidget(self.s_limit_slider)
-        controls_layout.addLayout(limit_layout)
+        s_limit_btn_group = QButtonGroup(self.slice_tab)
+        s_limit_btn_group.addButton(self.s_radio_limit_preset)
+        s_limit_btn_group.addButton(self.s_radio_limit_custom)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(self.s_radio_limit_preset)
+        row1.addWidget(self.s_limit_slider)
+        
+        row2 = QHBoxLayout()
+        row2.addWidget(self.s_radio_limit_custom)
+        row2.addWidget(self.s_limit_custom_input)
+        row2.addStretch()
+        
+        limit_layout.addLayout(row1)
+        limit_layout.addLayout(row2)
+        limit_group.setLayout(limit_layout)
+        
+        controls_layout.addWidget(limit_group)
 
         # 3. Settings Group
         slice_group = QGroupBox("切图模式 & 设置")
@@ -761,6 +869,61 @@ class ImageMatrixApp(QMainWindow):
         
         self.setup_list_actions(self.combine_list, self.delete_combine_items, self.rename_combine_items)
 
+    def init_convert_tab(self):
+        layout = QVBoxLayout(self.convert_tab)
+        
+        # Drop Label
+        self.convert_drop_label = QLabel("请将 PDF / PSD / PPT 文件拖拽到此处")
+        self.convert_drop_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.convert_drop_label.setStyleSheet(self._get_drop_style())
+        layout.addWidget(self.convert_drop_label)
+        
+        # List
+        self.convert_list = QListWidget()
+        self.convert_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        layout.addWidget(self.convert_list)
+        
+        # Controls
+        controls_layout = QVBoxLayout()
+        
+        # Format Selection
+        format_group = QGroupBox("导出格式")
+        format_group.setStyleSheet(self._get_group_style())
+        format_layout = QHBoxLayout()
+        
+        self.cv_radio_jpg = QRadioButton("JPG (推荐)")
+        self.cv_radio_png = QRadioButton("PNG")
+        self.cv_radio_jpg.setChecked(True)
+        
+        cv_fmt_group = QButtonGroup(self.convert_tab)
+        cv_fmt_group.addButton(self.cv_radio_jpg)
+        cv_fmt_group.addButton(self.cv_radio_png)
+        
+        format_layout.addWidget(self.cv_radio_jpg)
+        format_layout.addWidget(self.cv_radio_png)
+        format_group.setLayout(format_layout)
+        controls_layout.addWidget(format_group)
+        
+        layout.addLayout(controls_layout)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        self.cv_clear_btn = QPushButton("清空")
+        self.cv_clear_btn.clicked.connect(self.clear_convert_list)
+        self.cv_clear_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.cv_clear_btn.setStyleSheet("padding: 10px;")
+        btn_layout.addWidget(self.cv_clear_btn)
+
+        self.cv_start_btn = QPushButton("开始转换 (保存到桌面)")
+        self.cv_start_btn.clicked.connect(self.start_converting)
+        self.cv_start_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.cv_start_btn.setStyleSheet("background-color: #9C27B0; color: white; font-weight: bold; padding: 10px;")
+        btn_layout.addWidget(self.cv_start_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        self.setup_list_actions(self.convert_list, self.delete_convert_items, lambda: None)
+
 
     def _get_drop_style(self):
         return """
@@ -802,6 +965,8 @@ class ImageMatrixApp(QMainWindow):
                 self.delete_slice_items()
             elif self.tabs.currentIndex() == 2 and self.combine_list.hasFocus():
                 self.delete_combine_items()
+            elif self.tabs.currentIndex() == 3 and self.convert_list.hasFocus():
+                self.delete_convert_items()
         super().keyPressEvent(event)
 
     def show_context_menu(self, pos, list_widget, delete_slot, rename_slot):
@@ -929,14 +1094,29 @@ class ImageMatrixApp(QMainWindow):
             label_widget.setText(f"单页限制: {mb} MB")
 
     def update_limit_label(self, value, label_widget):
-        kb_val = value * 200
-        if value == 0:
-            label_widget.setText("限大小: 不限")
+        # 0: Unlimited
+        # 1: 150 KB
+        # 2: 300 KB
+        # 3: 500 KB
+        # 4: 750 KB
+        # 5: 1 MB (1000 KB)
+        mapping = {
+            0: 0,
+            1: 150,
+            2: 300,
+            3: 500,
+            4: 750,
+            5: 1000
+        }
+        kb_val = mapping.get(value, 0)
+        
+        if kb_val == 0:
+            label_widget.setText("预设: 无限制")
         else:
             if kb_val >= 1000:
-                label_widget.setText(f"限大小: 1 MB")
+                label_widget.setText(f"预设: {kb_val/1000:.1f} MB")
             else:
-                label_widget.setText(f"限大小: {kb_val} KB")
+                label_widget.setText(f"预设: {kb_val} KB")
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
@@ -946,42 +1126,52 @@ class ImageMatrixApp(QMainWindow):
 
     def dropEvent(self, event: QDropEvent):
         files = [u.toLocalFile() for u in event.mimeData().urls()]
-        valid_extensions = ('.jpg', '.jpeg', '.png', '.pdf')
         
-        new_images = []
+        current_index = self.tabs.currentIndex()
+        
+        # Define valid extensions based on tab
+        if current_index == 3: # Convert Tab
+             valid_extensions = ('.pdf', '.psd', '.ppt', '.pptx')
+        else:
+             valid_extensions = ('.jpg', '.jpeg', '.png', '.pdf')
+        
+        new_files = []
         for path in files:
             if os.path.isfile(path) and path.lower().endswith(valid_extensions):
-                new_images.append(path)
+                new_files.append(path)
             elif os.path.isdir(path):
                 for root, _, filenames in os.walk(path):
                     for fname in filenames:
                         if fname.lower().endswith(valid_extensions):
-                            new_images.append(os.path.join(root, fname))
+                            new_files.append(os.path.join(root, fname))
 
-        if not new_images:
-            QMessageBox.warning(self, "无效文件", "未找到支持的文件 (.jpg, .png, .pdf)")
+        if not new_files:
+            QMessageBox.warning(self, "无效文件", f"当前模式不支持该文件格式。\n仅支持: {valid_extensions}")
             return
 
-        current_index = self.tabs.currentIndex()
         if current_index == 0: # Merge Tab
-            combined_set = set(self.merge_images + new_images)
+            combined_set = set(self.merge_images + new_files)
             self.merge_images = sort_files(list(combined_set))
             self.update_merge_list()
             self.m_split_slider.setMaximum(max(1, len(self.merge_images)))
         elif current_index == 1: # Slice Tab
             # For slicing, order matters less, just append
-            for img in new_images:
+            for img in new_files:
                 if img not in self.slice_images:
                     self.slice_images.append(img)
             self.update_slice_list()
         elif current_index == 2: # Combine Tab
-            for img in new_images:
+            for img in new_files:
                 # Add to widget directly
                 from PyQt6.QtWidgets import QListWidgetItem
                 item = QListWidgetItem(os.path.basename(img))
                 item.setData(Qt.ItemDataRole.UserRole, img)
                 self.combine_list.addItem(item)
-            # Select the last added item effectively? Or just leave as is.
+        elif current_index == 3: # Convert Tab
+             for f in new_files:
+                 if f not in self.convert_files:
+                     self.convert_files.append(f)
+             self.update_convert_list()
 
     def update_merge_list(self):
         self.merge_list.clear()
@@ -1005,6 +1195,18 @@ class ImageMatrixApp(QMainWindow):
 
     def clear_combine_list(self):
         self.combine_list.clear()
+
+    def clear_convert_list(self):
+        self.convert_files = []
+        self.convert_list.clear()
+        
+    def update_convert_list(self):
+        self.convert_list.clear()
+        for path in self.convert_files:
+             self.convert_list.addItem(os.path.basename(path))
+
+    def delete_convert_items(self):
+        self._delete_items(self.convert_list, self.convert_files)
 
     def delete_combine_items(self):
         items = self.combine_list.selectedItems()
@@ -1122,7 +1324,20 @@ class ImageMatrixApp(QMainWindow):
                 return
 
         # Get Limit
-        limit_val = self.m_limit_slider.value() * 200 # 0 -> 0, 1 -> 200 ...
+        limit_val = 0
+        if self.m_radio_limit_custom.isChecked():
+            try:
+                c_val = int(self.m_limit_custom_input.text().strip())
+                if c_val <= 0: raise ValueError
+                limit_val = c_val
+            except ValueError:
+                 QMessageBox.warning(self, "输入错误", "请输入有效的限制大小(KB)！")
+                 return
+        else:
+            # Slider mapping
+            slider_val = self.m_limit_slider.value()
+            mapping = {0: 0, 1: 150, 2: 300, 3: 500, 4: 750, 5: 1000}
+            limit_val = mapping.get(slider_val, 0)
         
         # Get Mode
         mode = 'vertical'
@@ -1223,7 +1438,19 @@ class ImageMatrixApp(QMainWindow):
         elif self.s_radio_fmt_pdf.isChecked(): output_format = 'PDF'
 
         # Get Limit
-        limit_val = self.s_limit_slider.value() * 200
+        limit_val = 0
+        if self.s_radio_limit_custom.isChecked():
+             try:
+                c_val = int(self.s_limit_custom_input.text().strip())
+                if c_val <= 0: raise ValueError
+                limit_val = c_val
+             except ValueError:
+                 QMessageBox.warning(self, "输入错误", "请输入有效的限制大小(KB)！")
+                 return
+        else:
+            slider_val = self.s_limit_slider.value()
+            mapping = {0: 0, 1: 150, 2: 300, 3: 500, 4: 750, 5: 1000}
+            limit_val = mapping.get(slider_val, 0)
 
         # Get Direction/Mode
         direction = 'horizontal'
@@ -1316,6 +1543,32 @@ class ImageMatrixApp(QMainWindow):
             QMessageBox.information(self, "成功", f"{message}")
         else:
             QMessageBox.critical(self, "错误", f"合并失败：\n{message}")
+
+    def start_converting(self):
+        if not self.convert_files:
+            QMessageBox.warning(self, "提示", "请先添加文件！")
+            return
+
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+        
+        fmt = 'jpg'
+        if self.cv_radio_png.isChecked():
+            fmt = 'png'
+            
+        self.cv_start_btn.setEnabled(False)
+        self.cv_start_btn.setText("正在转换...")
+
+        self.converter_thread = ConverterThread(self.convert_files, desktop_path, fmt)
+        self.converter_thread.finished_signal.connect(self.on_converting_finished)
+        self.converter_thread.start()
+
+    def on_converting_finished(self, success, message):
+        self.cv_start_btn.setEnabled(True)
+        self.cv_start_btn.setText("开始转换 (保存到桌面)")
+        if success:
+             QMessageBox.information(self, "完成", message)
+        else:
+             QMessageBox.warning(self, "注意", message)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
